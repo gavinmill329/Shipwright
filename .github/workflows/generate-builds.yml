@@ -189,8 +189,31 @@ jobs:
         key: ${{ steps.restore-cache-deps.outputs.cache-primary-key }}
         path: deps
 
+  build-libsm64:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Git Checkout
+      uses: actions/checkout@v7
+    - name: Install MinGW
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-mingw-w64-x86-64
+    - name: Build sm64.dll and libsm64.so (Mario Mode)
+      run: |
+        cd libsm64
+        make -j4 lib CC=x86_64-w64-mingw32-gcc OS=Windows_NT LDFLAGS="-lm -shared -static-libgcc -static"
+        mkdir -p ../libsm64-out
+        cp dist/sm64.dll ../libsm64-out/
+        rm -rf build dist
+        make -j4 lib
+        cp dist/libsm64.so ../libsm64-out/
+    - name: Upload libsm64
+      uses: actions/upload-artifact@v7
+      with:
+        name: libsm64
+        path: libsm64-out
   build-windows:
-    needs: generate-soh-otr
+    needs: [generate-soh-otr, build-libsm64]
     runs-on: windows-latest
     steps:
     - name: Install dependencies
@@ -242,6 +265,15 @@ jobs:
         mv _packages/*.zip _packages/soh-windows.zip
     - name: Unzip package
       run: Expand-Archive -Path _packages/soh-windows.zip -DestinationPath soh-windows
+    - name: Download libsm64
+      uses: actions/download-artifact@v8
+      with:
+        name: libsm64
+        path: libsm64-out
+    - name: Add Mario Mode files
+      run: |
+        Copy-Item libsm64-out/sm64.dll soh-windows/
+        Copy-Item docs/MARIO_MODE.md soh-windows/MARIO_MODE.txt
     - name: Upload build
       uses: actions/upload-artifact@v7
       with:

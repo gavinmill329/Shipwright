@@ -7,7 +7,10 @@
 
 #include <libultraship/bridge/resourcebridge.h>
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
+#include "soh/Enhancements/Mario/MarioMode.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+
+s32 Player_OverrideLimbDrawPause(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* arg);
 #include "soh/Enhancements/randomizer/draw.h"
 #include "soh/ResourceManagerHelpers.h"
 
@@ -1096,6 +1099,7 @@ void Player_DrawImpl(PlayState* play, void** skeleton, Vec3s* jointTable, s32 dL
     SkelAnime_DrawFlexLod(play, skeleton, jointTable, dListCount, overrideLimbDraw, postLimbDraw, data, lod);
 
     if (!GameInteractor_InvisibleLinkActive() &&
+        !(MarioMode_HideLink() && (overrideLimbDraw != Player_OverrideLimbDrawPause)) &&
         ((CVarGetInteger(CVAR_ENHANCEMENT("FirstPersonGauntlets"), 0) && LINK_IS_ADULT) ||
          (overrideLimbDraw != Player_OverrideLimbDrawGameplayFirstPerson)) &&
         (overrideLimbDraw != Player_OverrideLimbDrawGameplayCrawling) &&
@@ -1448,6 +1452,9 @@ s32 Player_OverrideLimbDrawGameplayDefault(PlayState* play, s32 limbIndex, Gfx**
 
     if (GameInteractor_InvisibleLinkActive()) {
         this->actor.shape.shadowDraw = NULL;
+        *dList = NULL;
+    } else if (MarioMode_HideLink() && (this->actor.category == ACTORCAT_PLAYER)) {
+        // Mario Mode: Link's skeleton still animates (held items, Navi and the shadow follow it) but isn't drawn.
         *dList = NULL;
     }
 

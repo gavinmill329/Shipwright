@@ -15,6 +15,8 @@
 #include <soh/ResourceManagerHelpers.h>
 #include "soh/ShipInit.hpp"
 
+const char* MarioMode_GetStatusText();
+
 extern "C" {
 #include "functions.h"
 #include "variables.h"
@@ -1828,6 +1830,33 @@ void SohMenu::AddMenuEnhancements() {
     AddSidebarEntry("Enhancements", path.sidebarName, 3);
     path.column = SECTION_COLUMN_1;
 
+    AddWidget(path, "Mario Mode", WIDGET_SEPARATOR_TEXT);
+    AddWidget(path, "Play as Mario", WIDGET_CVAR_CHECKBOX)
+        .CVar(CVAR_ENHANCEMENT("MarioMode.Enabled"))
+        .Options(CheckboxOptions().DefaultValue(true).Tooltip(
+            "Replaces Link with Mario from Super Mario 64, with his full moveset and physics.\n\n"
+            "Needs sm64.dll next to the game and your own Super Mario 64 (USA) ROM (.z64/.n64/.v64) in the "
+            "same folder.\n\n"
+            "Controls: A jump, B punch/kick, Z or R crouch/ground pound. A still opens doors, talks, "
+            "grabs and climbs when the A button shows an action. C buttons use Link's items."));
+    AddWidget(path, "Mario Status", WIDGET_TEXT).PreFunc([](WidgetInfo& info) {
+        info.name = std::string("Status: ") + MarioMode_GetStatusText();
+        info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("MarioMode.Enabled"), 1) == 0;
+    });
+    AddWidget(path, "Mario Size", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR_ENHANCEMENT("MarioMode.Scale"))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("MarioMode.Enabled"), 1) == 0;
+        })
+        .Options(FloatSliderOptions().Min(2.0f).Max(5.0f).DefaultValue(3.2f).Format("%.1f").Tooltip(
+            "How many Mario 64 units fit in one Zelda unit. Lower = bigger Mario. 3.2 makes him a bit shorter "
+            "than adult Link. Changing it reloads the area's collision."));
+    AddWidget(path, "Mario Voice & Sound Volume", WIDGET_CVAR_SLIDER_FLOAT)
+        .CVar(CVAR_ENHANCEMENT("MarioMode.Volume"))
+        .PreFunc([](WidgetInfo& info) {
+            info.isHidden = CVarGetInteger(CVAR_ENHANCEMENT("MarioMode.Enabled"), 1) == 0;
+        })
+        .Options(FloatSliderOptions().Min(0.0f).Max(1.0f).DefaultValue(1.0f).IsPercentage());
     AddWidget(path, "Bounce off Walls", WIDGET_CVAR_CHECKBOX)
         .CVar(CVAR_ENHANCEMENT("BounceOffWalls"))
         .Options(

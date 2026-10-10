@@ -32,6 +32,7 @@
 #include "soh/frame_interpolation.h"
 #include "soh/OTRGlobals.h"
 #include "soh/Enhancements/savestate_serialize.h"
+#include "soh/Enhancements/Mario/MarioMode.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -12185,6 +12186,357 @@ void Player_UpdateCommon(Player* this, PlayState* play, Input* input) {
     Collider_ResetQuadAT(play, &this->shieldQuad.base);
 }
 
+// #region SOH [Mario Mode]
+// Mario (libsm64) drives movement; Link stays invisible at Mario's position so the rest of the game keeps
+// interacting with "the player" as usual. Link takes back control ("busy") for things Mario can't do himself:
+// talking, doors, chests, cutscenes, climbing, crawling, pushing blocks, using items, getting hurt...
+static s32 sMarioBusy = false;
+static s32 sMarioBusyTimer = 0;
+static s32 sMarioALinkOwned = false;
+static s32 sMarioLastAttack = 0;
+static s32 sMarioWasGrounded = true;
+
+#define MARIO_BUSY_FLAGS1                                                                                      \
+    (PLAYER_STATE1_LOADING | PLAYER_STATE1_INPUT_DISABLED | PLAYER_STATE1_TALKING | PLAYER_STATE1_DEAD |       \
+     PLAYER_STATE1_READY_TO_FIRE | PLAYER_STATE1_GETTING_ITEM | PLAYER_STATE1_HANGING_OFF_LEDGE |              \
+     PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_FIRST_PERSON | PLAYER_STATE1_CLIMBING_LADDER |               \
+     PLAYER_STATE1_ON_HORSE | PLAYER_STATE1_USING_BOOMERANG | PLAYER_STATE1_DAMAGED | PLAYER_STATE1_IN_ITEM_CS | \
+     PLAYER_STATE1_IN_CUTSCENE)
+#define MARIO_BUSY_FLAGS2                                                                                   \
+    (PLAYER_STATE2_MOVING_DYNAPOLY | PLAYER_STATE2_GRABBED_BY_ENEMY | PLAYER_STATE2_GRABBING_DYNAPOLY |     \
+     PLAYER_STATE2_FROZEN | PLAYER_STATE2_PAUSE_MOST_UPDATING | PLAYER_STATE2_CRAWLING |                    \
+     PLAYER_STATE2_OCARINA_PLAYING)
+#define MARIO_LINK_BUTTONS (BTN_CLEFT | BTN_CDOWN | BTN_CRIGHT | BTN_CUP)
+
+static s32 Player_MarioIsIdleAction(Player* this) {
+    return (this->actionFunc == Player_Action_Idle) || (this->actionFunc == Player_Action_80840450) ||
+           (this->actionFunc == Player_Action_808407CC);
+}
+
+static s32 Player_MarioCanTakeBack(Player* this) {
+    return Player_MarioIsIdleAction(this) || (this->actionFunc == Player_Action_80842180) ||
+           (this->actionFunc == Player_Action_80840DE4) || (this->actionFunc == Player_Action_8084411C);
+}
+
+static s32 Player_MarioLinkMustDrive(Player* this, PlayState* play) {
+    return (this->stateFlags1 & MARIO_BUSY_FLAGS1) || (this->stateFlags2 & MARIO_BUSY_FLAGS2) ||
+           (this->csAction != PLAYER_CSACTION_NONE) || (play->csCtx.state != CS_STATE_IDLE) ||
+           (gSaveContext.health <= 0) || (play->transitionTrigger != TRANS_TRIGGER_OFF) ||
+           (play->transitionMode != TRANS_MODE_OFF) || (Message_GetState(&play->msgCtx) != TEXT_STATE_NONE) ||
+           (this->actor.parent != NULL) || (this->actor.category != ACTORCAT_PLAYER);
+}
+
+// Something nearby Link would react to with A (the A button shows Open / Speak / Check / Grab / Climb...).
+static s32 Player_MarioHasInteraction(Player* this) {
+    return (this->doorType != PLAYER_DOORTYPE_NONE) ||
+           ((this->interactRangeActor != NULL) && (this->heldActor == NULL)) ||
+           (this->stateFlags2 & (PLAYER_STATE2_DO_ACTION_GRAB | PLAYER_STATE2_DO_ACTION_CLIMB |
+                                 PLAYER_STATE2_DO_ACTION_ENTER)) ||
+           ((this->stateFlags2 & PLAYER_STATE2_CAN_ACCEPT_TALK_OFFER) && (this->talkActor != NULL)) ||
+           ((this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR) && (this->heldActor != NULL));
+}
+
+// Mario's punches, kicks, dives, ground pounds and stomps use Link's sword hitbox.
+static void Player_MarioUpdateAttack(PlayState* play, Player* this, MarioFrameState* ms) {
+    Vec3f a, b, c, d;
+    f32 sinY = Math_SinS(ms->faceYaw);
+    f32 cosY = Math_CosS(ms->faceYaw);
+    f32 height = 160.0f / MarioMode_GetScale();
+    f32 reach = 70.0f / MarioMode_GetScale();
+    u32 dmgFlags;
+    s32 i;
+
+    sMarioLastAttack = MARIO_ATTACK_NONE;
+    if (ms->attack == MARIO_ATTACK_NONE) {
+        return;
+    }
+
+    sMarioLastAttack = ms->attack;
+
+    if (ms->attack == MARIO_ATTACK_STOMP || ms->attack == MARIO_ATTACK_POUND) {
+        // Flat quad under his feet
+        f32 r = reach;
+        dmgFlags = (ms->attack == MARIO_ATTACK_POUND) ? DMG_HAMMER_JUMP : DMG_JUMP_KOKIRI;
+        a.x = ms->pos[0] - r; a.y = ms->pos[1] - 5.0f; a.z = ms->pos[2] - r;
+        b.x = ms->pos[0] + r; b.y = ms->pos[1] - 5.0f; b.z = ms->pos[2] - r;
+        c.x = ms->pos[0] - r; c.y = ms->pos[1] + 15.0f; c.z = ms->pos[2] + r;
+        d.x = ms->pos[0] + r; d.y = ms->pos[1] + 15.0f; d.z = ms->pos[2] + r;
+    } else {
+        // Vertical quad from Mario's body to just in front of him
+        dmgFlags = DMG_SLASH_KOKIRI;
+        a.x = ms->pos[0]; a.y = ms->pos[1] + 5.0f; a.z = ms->pos[2];
+        b.x = ms->pos[0]; b.y = ms->pos[1] + height; b.z = ms->pos[2];
+        c.x = ms->pos[0] + sinY * reach; c.y = ms->pos[1] + 5.0f; c.z = ms->pos[2] + cosY * reach;
+        d.x = ms->pos[0] + sinY * reach; d.y = ms->pos[1] + height; d.z = ms->pos[2] + cosY * reach;
+    }
+
+    for (i = 0; i < 2; i++) {
+        func_80837918(this, i, dmgFlags);
+        this->meleeWeaponQuads[i].info.toucher.damage = 2;
+    }
+    Collider_SetQuadVertices(&this->meleeWeaponQuads[0], &a, &b, &c, &d);
+    Collider_SetQuadVertices(&this->meleeWeaponQuads[1], &b, &a, &d, &c);
+    CollisionCheck_SetAT(play, &play->colChkCtx, &this->meleeWeaponQuads[0].base);
+    CollisionCheck_SetAT(play, &play->colChkCtx, &this->meleeWeaponQuads[1].base);
+}
+
+static void Player_MarioApplyState(Player* this, MarioFrameState* ms) {
+    this->actor.world.pos.x = ms->pos[0];
+    this->actor.world.pos.y = ms->pos[1];
+    this->actor.world.pos.z = ms->pos[2];
+    this->actor.velocity.x = ms->vel[0];
+    this->actor.velocity.y = ms->vel[1];
+    this->actor.velocity.z = ms->vel[2];
+    this->actor.speedXZ = ms->forwardVel;
+    this->linearVelocity = 0.0f;
+    this->actor.gravity = 0.0f;
+    this->actor.shape.rot.y = this->actor.world.rot.y = this->yaw = ms->faceYaw;
+    this->fallStartHeight = this->actor.world.pos.y;
+    this->fallDistance = 0;
+}
+
+// Mario is in control this frame. Mirrors the parts of Player_UpdateCommon that the rest of the game relies on.
+static void Player_UpdateMarioPuppet(Player* this, PlayState* play, Input* input) {
+    MarioFrameState ms;
+    Input linkInput;
+    PlayerActionFunc idleAction;
+    s32 gaveLinkAButton;
+    s32 gaveLinkButtons;
+    f32 stickMag;
+
+    // A goes to Link when there is something to interact with, otherwise Mario jumps.
+    if (CHECK_BTN_ALL(input->press.button, BTN_A)) {
+        sMarioALinkOwned = sMarioWasGrounded && Player_MarioHasInteraction(this);
+    } else if (!CHECK_BTN_ALL(input->cur.button, BTN_A)) {
+        sMarioALinkOwned = false;
+    }
+
+    MarioMode_TickFree(play, this, input, sMarioALinkOwned, &ms);
+    if (!ms.valid) {
+        // libsm64 couldn't place Mario (e.g. no floor under Link yet); let Link handle this frame.
+        Player_UpdateCommon(this, play, input);
+        return;
+    }
+
+    sMarioWasGrounded = ms.grounded;
+    gaveLinkAButton = sMarioALinkOwned && CHECK_BTN_ALL(input->press.button, BTN_A);
+    gaveLinkButtons = gaveLinkAButton || (input->press.button & MARIO_LINK_BUTTONS);
+
+    linkInput = *input;
+    linkInput.cur.stick_x = linkInput.cur.stick_y = 0;
+    linkInput.rel.stick_x = linkInput.rel.stick_y = 0;
+    linkInput.press.stick_x = linkInput.press.stick_y = 0;
+    {
+        u16 keep = MARIO_LINK_BUTTONS | (sMarioALinkOwned ? BTN_A : 0);
+        linkInput.cur.button &= keep;
+        linkInput.press.button &= keep;
+        linkInput.rel.button &= keep;
+        linkInput.prev.button &= keep;
+    }
+    sControlInput = &linkInput;
+
+    Math_Vec3f_Copy(&this->actor.prevPos, &this->actor.home.pos);
+
+    // While Mario drives, Link idles. Anything that moves him out of idle below means Link takes over.
+    if (!Player_MarioIsIdleAction(this)) {
+        func_80853080(this, play);
+    }
+    idleAction = this->actionFunc;
+
+    if (this->unk_A73 != 0) {
+        this->unk_A73--;
+    }
+    if (this->textboxBtnCooldownTimer != 0) {
+        this->textboxBtnCooldownTimer--;
+    }
+    if (this->unk_A87 != 0) {
+        this->unk_A87--;
+    }
+    if (this->invincibilityTimer < 0) {
+        this->invincibilityTimer++;
+    } else if (this->invincibilityTimer > 0) {
+        this->invincibilityTimer--;
+    }
+    if (this->unk_890 != 0) {
+        this->unk_890--;
+    }
+
+    Player_UpdateInterface(play, this);
+    Player_UpdateZTargeting(this, play);
+
+    if (this->bodyShockTimer != 0) {
+        Player_UpdateBodyShock(play, this);
+    }
+    if (this->bodyIsBurning) {
+        Player_UpdateBodyBurn(play, this);
+    }
+
+    FaceChange_UpdateBlinking(this->unk_3A8, 20, 80, 6);
+    this->actor.shape.face = this->unk_3A8[0] + ((play->gameplayFrames & 32) ? 0 : 3);
+
+    // Floors, walls, loading zones, voids, switches: all evaluated at Mario's position.
+    Player_MarioApplyState(this, &ms);
+    Player_ProcessSceneCollision(play, this);
+    Player_MarioApplyState(this, &ms);
+    this->actor.yDistToWater = ms.inWater ? 100.0f : this->actor.yDistToWater;
+
+    if (!Player_InBlockingCsMode(play, this)) {
+        if ((this->actor.parent == NULL) && (play->transitionTrigger != TRANS_TRIGGER_START) &&
+            (this->unk_A87 == 0)) {
+            func_808382DC(this, play); // getting hurt (hands control to Link for the knockback)
+        }
+        this->fallStartHeight = this->actor.world.pos.y;
+        Player_DetectRumbleSecrets(this);
+    }
+
+    if ((play->csCtx.state != CS_STATE_IDLE) && (this->csAction != 6) &&
+        !(this->stateFlags2 & PLAYER_STATE2_GRABBED_BY_ENEMY) && (this->actor.category == ACTORCAT_PLAYER)) {
+        CsCmdActorCue* linkActionCsCmd = play->csCtx.linkAction;
+
+        if ((linkActionCsCmd != NULL) && (sCueToCsActionMap[linkActionCsCmd->action] != 0)) {
+            Player_SetCsActionWithHaltedActors(play, NULL, 6);
+            Player_ZeroSpeedXZ(this);
+        } else if ((this->csAction == 0) && (play->csCtx.state != CS_STATE_UNSKIPPABLE_INIT)) {
+            Player_SetCsActionWithHaltedActors(play, NULL, 0x31);
+            Player_ZeroSpeedXZ(this);
+        }
+    }
+
+    if ((this->focusActor == NULL) && (this->naviTextId == 0)) {
+        this->stateFlags2 &= ~(PLAYER_STATE2_CAN_ACCEPT_TALK_OFFER | PLAYER_STATE2_NAVI_ALERT);
+    }
+
+    this->stateFlags1 &= ~(PLAYER_STATE1_SWINGING_BOTTLE | PLAYER_STATE1_READY_TO_FIRE |
+                           PLAYER_STATE1_CHARGING_SPIN_ATTACK | PLAYER_STATE1_SHIELDING);
+    this->stateFlags2 &= ~(PLAYER_STATE2_DO_ACTION_GRAB | PLAYER_STATE2_DO_ACTION_CLIMB | PLAYER_STATE2_FOOTSTEP |
+                           PLAYER_STATE2_DISABLE_ROTATION_Z_TARGET | PLAYER_STATE2_DISABLE_ROTATION_ALWAYS |
+                           PLAYER_STATE2_GRABBING_DYNAPOLY | PLAYER_STATE2_FORCE_SAND_FLOOR_SOUND |
+                           PLAYER_STATE2_STATIONARY_LADDER | PLAYER_STATE2_FROZEN | PLAYER_STATE2_DO_ACTION_ENTER |
+                           PLAYER_STATE2_DO_ACTION_DOWN | PLAYER_STATE2_REFLECTION);
+    this->stateFlags3 &= ~PLAYER_STATE3_CHECK_FLOOR_WATER_COLLISION;
+
+    func_80847298(this);
+    Player_ProcessControlStick(play, this);
+
+    sWaterSpeedFactor = 1.0f;
+    sInvWaterSpeedFactor = 1.0f;
+    sUseHeldItem = sHeldItemButtonIsHeldDown = 0;
+    sSavedCurrentMask = this->currentMask;
+
+    // Damage, cutscenes or a forced textbox started above: Link takes it from here.
+    if ((this->actionFunc != idleAction) || Player_MarioLinkMustDrive(this, play)) {
+        sMarioBusy = true;
+        sMarioBusyTimer = 0;
+    }
+
+    // Link only "acts" while Mario stands on the ground: that's where talking, opening, grabbing, climbing vines,
+    // entering crawlspaces, throwing and using C-button items happen. He never walks on his own (zero stick);
+    // his speed is set from Mario's so walking into a vine wall or ladder starts a climb like it does for Link.
+    stickMag = sqrtf(SQ((f32)input->cur.stick_x) + SQ((f32)input->cur.stick_y));
+    if (!sMarioBusy && ms.grounded && !(this->stateFlags3 & PLAYER_STATE3_PAUSE_ACTION_FUNC)) {
+        this->linearVelocity = (stickMag > 30.0f) ? CLAMP_MIN(ms.forwardVel, 2.0f) : 0.0f;
+        this->actionFunc(this, play);
+        if (!Player_MarioIsIdleAction(this) || Player_MarioLinkMustDrive(this, play)) {
+            if (gaveLinkButtons || Player_MarioLinkMustDrive(this, play)) {
+                sMarioBusy = true;
+                sMarioBusyTimer = 0;
+            } else {
+                func_80853080(this, play); // ignore anything Link started by himself (slopes, ledges...)
+            }
+        }
+    }
+
+    Player_UpdateCamAndSeqModes(play, this);
+    if (!sMarioBusy) {
+        Player_MarioApplyState(this, &ms);
+    }
+
+    if (CHECK_FLAG_ALL(this->actor.flags, ACTOR_FLAG_TALK)) {
+        this->talkActorDistance = 0.0f;
+    } else {
+        this->talkActor = NULL;
+        this->talkActorDistance = FLT_MAX;
+        this->exchangeItemId = EXCH_ITEM_NONE;
+    }
+    if (!(this->stateFlags1 & PLAYER_STATE1_CARRYING_ACTOR)) {
+        this->interactRangeActor = NULL;
+        this->getItemDirection = 0x6000;
+    }
+    if (this->actor.parent == NULL) {
+        this->rideActor = NULL;
+    }
+    this->naviTextId = 0;
+    if (!(this->stateFlags2 & PLAYER_STATE2_PLAY_FOR_ACTOR)) {
+        this->unk_6A8 = NULL;
+    }
+    this->stateFlags2 &= ~PLAYER_STATE2_NEAR_OCARINA_ACTOR;
+    this->closestSecretDistSq = FLT_MAX;
+    this->doorType = PLAYER_DOORTYPE_NONE;
+    this->knockbackType = 0;
+    this->autoLockOnActor = NULL;
+
+    // Hurtbox sized like Mario
+    this->cylinder.dim.height = 150.0f / MarioMode_GetScale();
+    this->cylinder.dim.yShift = 0;
+    Collider_UpdateCylinder(&this->actor, &this->cylinder);
+    if (!(this->stateFlags2 & PLAYER_STATE2_FROZEN)) {
+        if (!(this->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_HANGING_OFF_LEDGE |
+                                   PLAYER_STATE1_CLIMBING_LEDGE | PLAYER_STATE1_ON_HORSE))) {
+            CollisionCheck_SetOC(play, &play->colChkCtx, &this->cylinder.base);
+        }
+        if (!(this->stateFlags1 & (PLAYER_STATE1_DEAD | PLAYER_STATE1_DAMAGED)) && (this->invincibilityTimer <= 0)) {
+            CollisionCheck_SetAC(play, &play->colChkCtx, &this->cylinder.base);
+        }
+    }
+
+    Player_MarioUpdateAttack(play, this, &ms);
+
+    AnimationContext_SetNextQueue(play);
+
+    Math_Vec3f_Copy(&this->actor.home.pos, &this->actor.world.pos);
+    Math_Vec3f_Copy(&this->unk_A88, &this->bodyPartsPos[PLAYER_BODYPART_WAIST]);
+    this->actor.colChkInfo.mass = 50;
+    this->stateFlags3 &= ~PLAYER_STATE3_PAUSE_ACTION_FUNC;
+
+    Collider_ResetCylinderAC(play, &this->cylinder.base);
+    Collider_ResetQuadAC(play, &this->shieldQuad.base);
+    Collider_ResetQuadAT(play, &this->shieldQuad.base);
+    // (sword quads are reset at the start of the next frame, after the hit was registered)
+}
+
+static void Player_UpdateMarioMode(Player* this, PlayState* play, Input* input) {
+    // Stomping an enemy bounces Mario like in SM64.
+    if ((sMarioLastAttack == MARIO_ATTACK_STOMP) && !sMarioBusy &&
+        ((this->meleeWeaponQuads[0].base.atFlags | this->meleeWeaponQuads[1].base.atFlags) & AT_HIT)) {
+        MarioMode_Bounce();
+    }
+    sMarioLastAttack = MARIO_ATTACK_NONE;
+
+    Collider_ResetQuadAT(play, &this->meleeWeaponQuads[0].base);
+    Collider_ResetQuadAT(play, &this->meleeWeaponQuads[1].base);
+
+    if (!sMarioBusy && Player_MarioLinkMustDrive(this, play)) {
+        sMarioBusy = true;
+        sMarioBusyTimer = 0;
+    }
+
+    if (sMarioBusy) {
+        Player_UpdateCommon(this, play, input);
+        MarioMode_TickFollow(play, this);
+        sMarioBusyTimer++;
+        if ((sMarioBusyTimer > 3) && !Player_MarioLinkMustDrive(this, play) && Player_MarioCanTakeBack(this)) {
+            sMarioBusy = false;
+            sMarioALinkOwned = CHECK_BTN_ALL(input->cur.button, BTN_A); // don't jump on the A that closed a textbox
+            MarioMode_TakeOverFromLink(play, this);
+            func_80853080(this, play);
+        }
+        return;
+    }
+
+    Player_UpdateMarioPuppet(this, play, input);
+}
+// #endregion
+
 static Vec3f sDogSpawnOffset = { 0.0f, 0.0f, -30.0f };
 
 s32 Player_UpdateNoclip(Player* this, PlayState* play);
@@ -12246,7 +12598,12 @@ void Player_Update(Actor* thisx, PlayState* play) {
             }
         }
 
-        Player_UpdateCommon(this, play, &input);
+        if (MarioMode_IsActive()) {
+            Player_UpdateMarioMode(this, play, &input);
+        } else {
+            sMarioBusy = false;
+            Player_UpdateCommon(this, play, &input);
+        }
     }
 
     MREG(52) = this->actor.world.pos.x;
@@ -12377,7 +12734,7 @@ void Player_DrawGameplay(PlayState* play, Player* this, s32 lod, Gfx* cullDList,
             MATRIX_TOMTX(bunnyEarMtx);
         }
 
-        if (!GameInteractor_InvisibleLinkActive() &&
+        if (!GameInteractor_InvisibleLinkActive() && !MarioMode_HideLink() &&
             GameInteractor_Should(VB_DRAW_PLAYER_MASK, true, this->currentMask, play)) {
             if (this->currentMask != PLAYER_MASK_BUNNY || !CVarGetInteger(CVAR_ENHANCEMENT("HideBunnyHood"), 0)) {
                 gSPDisplayList(POLY_OPA_DISP++, sMaskDlists[this->currentMask - 1]);
@@ -12547,6 +12904,10 @@ void Player_Draw(Actor* thisx, PlayState* play2) {
     }
 
     CLOSE_DISPS(play->state.gfxCtx);
+
+    if (!(this->stateFlags2 & PLAYER_STATE2_DISABLE_DRAW)) {
+        MarioMode_Draw(play, this);
+    }
 }
 
 void Player_Destroy(Actor* thisx, PlayState* play) {
