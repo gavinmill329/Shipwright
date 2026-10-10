@@ -199,11 +199,27 @@ void Extractor::SetRomInfo(const std::string& path) {
     mCurRomSize = GetCurRomSize();
 }
 
+// Mario Mode: the Super Mario 64 ROM sits in the same folder as the Zelda ROM. It is for Mario, not for
+// extraction, so leave it out of the search instead of complaining about its size.
+static bool IsSuperMario64Rom(const std::string& path) {
+    std::ifstream file(path, std::ios::in | std::ios::binary);
+    unsigned char header[0x40];
+    if (!file.read(reinterpret_cast<char*>(header), sizeof(header))) {
+        return false;
+    }
+    BitConverter::RomToBigEndian(header, sizeof(header));
+    return memcmp(&header[0x20], "SUPER MARIO 64", 14) == 0;
+}
+
 void Extractor::FilterRoms(std::vector<std::string>& roms, RomSearchMode searchMode) {
     std::vector<std::string>::iterator it = roms.begin();
 
     while (it != roms.end()) {
         std::string rom = *it;
+        if (IsSuperMario64Rom(rom)) {
+            it = roms.erase(it);
+            continue;
+        }
         SetRomInfo(rom);
 
         // Skip. We will handle rom size errors later on after filtering

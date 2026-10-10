@@ -333,20 +333,41 @@ bool IsSm64UsRom(const std::vector<uint8_t>& rom) {
            rom[0x3C] == 'S' && rom[0x3D] == 'M' && rom[0x3E] == 'E';
 }
 
+std::string sRomProblem; // why the last Super Mario 64 ROM we looked at couldn't be used
+
 bool TryRomFile(const std::filesystem::path& path) {
     std::error_code ec;
     auto size = std::filesystem::file_size(path, ec);
-    // SM64 is an 8 MiB cartridge; skip anything else (like the Ocarina of Time ROM sitting in the same folder).
-    if (ec || size != 0x800000) {
+    if (ec || size < 0x40) {
         return false;
     }
     std::ifstream file(path, std::ios::binary);
     if (!file) {
         return false;
     }
+    // Look at the header first so the Zelda ROM in the same folder is skipped without reading all of it.
+    std::vector<uint8_t> header(0x40);
+    file.read(reinterpret_cast<char*>(header.data()), 0x40);
+    if (!file || !NormalizeRom(header) || std::memcmp(&header[0x20], "SUPER MARIO 64", 14) != 0) {
+        return false;
+    }
+    std::string name = path.filename().string();
+    char region = (char)header[0x3E];
+    if (region != 'E') {
+        const char* which = region == 'J' ? "Japanese" : (region == 'P' ? "European" : "non-USA");
+        sRomProblem = name + " is the " + which + " version of Super Mario 64. Mario needs the USA (NTSC-U) version.";
+        return false;
+    }
+    if (size != 0x800000) {
+        sRomProblem = name + " is " + std::to_string(size / (1024 * 1024)) +
+                      " MB. The original Super Mario 64 (USA) is exactly 8 MB; romhacks and expanded ROMs won't work.";
+        return false;
+    }
     std::vector<uint8_t> data((size_t)size);
+    file.seekg(0);
     file.read(reinterpret_cast<char*>(data.data()), (std::streamsize)size);
     if (!file || !NormalizeRom(data) || !IsSm64UsRom(data)) {
+        sRomProblem = name + " couldn't be read as a Super Mario 64 (USA) ROM.";
         return false;
     }
     sRom = std::move(data);
@@ -377,7 +398,11 @@ bool FindRom() {
             }
         }
     }
-    sStatus = "Couldn't find a Super Mario 64 (USA) ROM. Put it (.z64/.n64/.v64) next to the game's .exe.";
+    if (!sRomProblem.empty()) {
+        sStatus = sRomProblem;
+    } else {
+        sStatus = "Couldn't find a Super Mario 64 (USA) ROM. Put it (.z64/.n64/.v64) next to the game's .exe.";
+    }
     return false;
 }
 
