@@ -258,7 +258,11 @@ jobs:
       run: |
         set $env:PATH="$env:USERPROFILE/.cargo/bin;$env:PATH"
         cmake -S . -B build-windows -G Ninja -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_BUILD_TYPE:STRING=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DBUILD_REMOTE_CONTROL=1
-        cmake --build build-windows --config Release --parallel 10
+        cmake --build build-windows --config Release --parallel 10 2>&1 | Tee-Object -FilePath build-windows.log
+        if ($LASTEXITCODE -ne 0) {
+          Select-String -Path build-windows.log -Pattern " error |error:|fatal error" | Select-Object -First 40 | ForEach-Object { Write-Output "::error::$($_.Line)" }
+          exit 1
+        }
 
         (cd build-windows && cpack)
         cd ..
