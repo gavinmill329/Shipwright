@@ -47,6 +47,7 @@
 
 #include <SDL2/SDL_messagebox.h>
 
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <filesystem>
@@ -243,6 +244,7 @@ void Extractor::FilterRoms(std::vector<std::string>& roms, RomSearchMode searchM
 }
 
 void Extractor::GetRoms(std::vector<std::string>& roms) {
+    const size_t firstNew = roms.size();
 #ifdef _WIN32
     WIN32_FIND_DATAA ffd;
     std::string search = std::string(mSearchPath + "\\*");
@@ -293,6 +295,8 @@ void Extractor::GetRoms(std::vector<std::string>& roms) {
         }
     }
 #endif
+    // Mario Mode: never offer the Super Mario 64 ROM for Zelda extraction.
+    roms.erase(std::remove_if(roms.begin() + firstNew, roms.end(), IsSuperMario64Rom), roms.end());
 }
 
 bool Extractor::GetRomPathFromBox() {
