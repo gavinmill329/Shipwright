@@ -1154,6 +1154,14 @@ void geo_process_root_hack_single_node(struct GraphNode *node)
         mtxf_rotate_zxy_and_translate( rotTran, gMarioObject->header.gfx.pos, gMarioObject->header.gfx.angle );
         mtxf_mul( gMatStack[++gMatStackIndex], scale, rotTran );
     }
+    // libsm64-oot: Mario has no animation until his first action runs, which doesn't happen while he has no
+    // floor below him. Drawing him then would read a NULL animation, so draw nothing this frame.
+    if (gMarioObject->header.gfx.animInfo.curAnim == NULL) {
+        gMarioObject->header.gfx.throwMatrix = NULL;
+        gMatStackIndex = 0;
+        alloc_only_pool_free(gDisplayListHeap);
+        return;
+    }
     geo_set_animation_globals(&gMarioObject->header.gfx.animInfo, 1);
 
     gCurGraphNodeRoot = (struct GraphNodeRoot *)node;

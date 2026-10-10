@@ -193,6 +193,10 @@ s16 find_mario_anim_flags_and_translation(struct Object *obj, s32 yaw, Vec3s tra
     f32 dz;
 
     struct Animation *curAnim = (void *) obj->header.gfx.animInfo.curAnim;
+    if (curAnim == NULL) { // libsm64-oot: no animation yet
+        translation[0] = translation[1] = translation[2] = 0;
+        return 0;
+    }
     s16 animFrame = geo_update_animation_frame(&obj->header.gfx.animInfo, NULL);
     u16 *animIndex = segmented_to_virtual((void *) curAnim->index);
     s16 *animValues = segmented_to_virtual((void *) curAnim->values);

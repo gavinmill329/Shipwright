@@ -6,6 +6,9 @@ Local changes for Mario Mode in Ship of Harkinian:
 
 - `src/load_surfaces.c`: when a surface object is deleted, clear Mario's platform pointer if it pointed at that
   object, so the next tick doesn't read freed memory.
+- `src/decomp/game/rendering_graph_node.c`, `src/decomp/game/mario.c`: don't read Mario's animation before he
+  has one. That happens while there is no floor under him, because his action code doesn't run then; upstream
+  dereferences NULL and crashes.
 - `import-mario-geo.py`: can read Mario's geo/model from a local checkout of n64decomp/sm64 via `SM64_DECOMP_DIR`
   (otherwise downloads them from GitHub at build time, as upstream does).
 

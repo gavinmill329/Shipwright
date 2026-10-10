@@ -159,7 +159,7 @@ enum class LoadState { NotTried, Ready, Failed };
 Sm64Api sApi;
 void* sLibHandle = nullptr;
 LoadState sLoadState = LoadState::NotTried;
-std::string sStatus = "Not loaded yet. Turn the option on to load it.";
+std::string sStatus = "Mario loads when you start or load a save file.";
 
 std::vector<uint8_t> sRom;
 uint8_t sTextureAtlas[4 * SM64_TEXTURE_WIDTH * SM64_TEXTURE_HEIGHT];
@@ -458,7 +458,8 @@ bool EnsureLoaded() {
         SPDLOG_WARN("[MarioMode] {}", sStatus);
         return false;
     }
-    if (sApi.register_debug_print_function != nullptr) {
+    // libsm64 prints several lines per audio step; only hook it up when debugging.
+    if (sApi.register_debug_print_function != nullptr && CVarGetInteger(CVAR_ENHANCEMENT("MarioMode.DebugLog"), 0)) {
         sApi.register_debug_print_function(DebugPrint);
     }
     sApi.global_init(sRom.data(), sTextureAtlas);
@@ -765,6 +766,10 @@ extern "C" int32_t MarioMode_IsActive(void) {
         return false;
     }
     sWasEnabled = true;
+    // Only during normal play: the title-screen demo, file select and credits keep Link.
+    if (gSaveContext.gameMode != GAMEMODE_NORMAL) {
+        return false;
+    }
     return EnsureLoaded();
 }
 
