@@ -35,9 +35,10 @@ extern "C" {
 #include "macros.h"
 #include "functions.h"
 #include "variables.h"
-#include "soh/frame_interpolation.h"
 extern PlayState* gPlayState;
 }
+
+#include "soh/frame_interpolation.h"
 
 #include "MarioMode.h"
 
